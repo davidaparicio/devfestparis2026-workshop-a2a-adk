@@ -179,6 +179,7 @@ async def chat_stream(request: SimpleChatRequest):
 
     async def event_generator():
         final_text = ""
+        last_text = ""  # fallback, e.g. error events or pipeline not reaching the builder
         async for event in events:
             # Send progress updates based on which agent is active
             if event["author"] == "researcher":
@@ -187,14 +188,21 @@ async def chat_stream(request: SimpleChatRequest):
                  yield json.dumps({"type": "progress", "text": "⚖️ Judge is evaluating findings..."}) + "\n"
             elif event["author"] == "content_builder":
                  yield json.dumps({"type": "progress", "text": "✍️ Content Builder is writing the course..."}) + "\n"
-            # Accumulate final text
-            if "content" in event and event["content"]:
+            # Only keep the final course produced by the content builder.
+            # Researcher findings and judge JSON are intermediate outputs and
+            # must not be concatenated into the result (that caused duplicates).
+            if event.get("author") == "content_builder" and event.get("content"):
                 content = genai_types.Content.model_validate(event["content"])
-                for part in content.parts: # type: ignore
-                    if part.text:
+                for part in content.parts or []:
+                    if part.text and not part.thought:
                         final_text += part.text
+            elif event.get("content"):
+                content = genai_types.Content.model_validate(event["content"])
+                text = "".join(p.text for p in (content.parts or []) if p.text and not p.thought)
+                if text:
+                    last_text = text
         # Send final result
-        yield json.dumps({"type": "result", "text": final_text.strip()}) + "\n"
+        yield json.dumps({"type": "result", "text": (final_text or last_text).strip()}) + "\n"
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson")
 
